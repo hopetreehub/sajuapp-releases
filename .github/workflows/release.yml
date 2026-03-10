@@ -1,0 +1,165 @@
+name: Build & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v2.3.1)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: hopetreehub/sajuapp-project2
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies (root)
+        run: npm ci
+
+      - name: Build Vite + Electron Windows installer
+        working-directory: packages/web
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ELECTRON_BUILD: 'true'
+        run: npm run build && npx electron-builder --win --publish never
+
+      - name: Upload Windows installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: packages/web/dist-electron/*.exe
+          if-no-files-found: error
+
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: hopetreehub/sajuapp-project2
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies (root)
+        run: npm ci
+
+      - name: Build Vite
+        working-directory: packages/web
+        run: npm run build
+
+      - name: Initialize Android project
+        working-directory: packages/web
+        run: |
+          npx cap add android || true
+          npx cap sync android
+
+      - name: Make gradlew executable
+        working-directory: packages/web/android
+        run: chmod +x gradlew
+
+      - name: Remove compressed files (prevent duplicate resource error)
+        working-directory: packages/web/android/app/src/main/assets
+        run: find . -name "*.gz" -o -name "*.br" | xargs rm -f
+
+      - name: Build Android debug APK
+        working-directory: packages/web/android
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Rename APK with version
+        run: |
+          VERSION=${{ github.event.inputs.version }}
+          cp packages/web/android/app/build/outputs/apk/debug/app-debug.apk \
+             packages/web/android/app/build/outputs/apk/debug/SajuApp-${VERSION}.apk
+
+      - name: Upload Android APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: packages/web/android/app/build/outputs/apk/debug/SajuApp-*.apk
+          if-no-files-found: error
+
+  create-release:
+    needs: [build-windows, build-android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Windows installer
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: ./release-files/
+
+      - name: Download Android APK
+        uses: actions/download-artifact@v4
+        with:
+          name: android-apk
+          path: ./release-files/
+
+      - name: List release files
+        run: ls -la ./release-files/
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_VERSION=${{ github.event.inputs.version }}
+          cat > release-notes.md << 'EOF'
+          ## 신기한신점 릴리즈
+
+          ### 📥 다운로드
+
+          | 플랫폼 | 파일 | 설명 |
+          |--------|------|------|
+          | 🖥️ Windows | `SajuApp-Setup-*.exe` | Windows 설치 파일 (NSIS 인스톨러) |
+          | 🤖 Android | `SajuApp-*.apk` | Android 설치 파일 (APK) |
+
+          ### 📋 설치 방법
+
+          **Windows**
+          1. `SajuApp-Setup-*.exe` 파일을 다운로드
+          2. 파일을 실행하여 설치
+          3. 시작 메뉴 또는 바탕화면 바로가기로 실행
+
+          **Android**
+          1. `SajuApp-*.apk` 파일을 다운로드
+          2. 기기 설정 → 보안 → 알 수 없는 출처 앱 허용
+          3. APK 파일을 실행하여 설치
+
+          ### ⚠️ 주의사항
+          - Android APK는 Debug 빌드입니다
+          - 인터넷 연결이 필요합니다
+          EOF
+
+          gh release create ${RELEASE_VERSION} \
+            --title "신기한신점 ${RELEASE_VERSION}" \
+            --notes-file release-notes.md \
+            --latest \
+            ./release-files/*
