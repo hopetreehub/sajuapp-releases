@@ -88,21 +88,69 @@ jobs:
         working-directory: packages/web/android/app/src/main/assets
         run: find . -name "*.gz" -o -name "*.br" | xargs rm -f
 
-      - name: Build Android debug APK
+      - name: Setup Android signing
+        if: ${{ env.ANDROID_KEYSTORE_BASE64 != '' }}
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > packages/web/android/app/release-keystore.jks
+          cat > packages/web/android/app/keystore.properties << EOF
+          storeFile=release-keystore.jks
+          storePassword=${{ secrets.KEYSTORE_PASSWORD }}
+          keyAlias=${{ secrets.KEY_ALIAS }}
+          keyPassword=${{ secrets.KEY_PASSWORD }}
+          EOF
+
+      - name: Configure release signing in build.gradle
+        working-directory: packages/web/android/app
+        run: |
+          if [ -f keystore.properties ]; then
+            sed -i '/android {/a \
+              signingConfigs {\
+                release {\
+                  def props = new Properties()\
+                  props.load(new FileInputStream(file("keystore.properties")))\
+                  storeFile file(props["storeFile"].trim())\
+                  storePassword props["storePassword"].trim()\
+                  keyAlias props["keyAlias"].trim()\
+                  keyPassword props["keyPassword"].trim()\
+                }\
+              }' build.gradle
+            sed -i 's/buildTypes {/buildTypes {\n        release {\n            signingConfig signingConfigs.release\n            minifyEnabled false\n            proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"\n        }/' build.gradle
+            echo "Release signing configured"
+          else
+            echo "No keystore.properties found, building debug APK"
+          fi
+
+      - name: Build Android APK
         working-directory: packages/web/android
-        run: ./gradlew assembleDebug --no-daemon
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -f app/keystore.properties ]; then
+            echo "Building release APK with signing..."
+            ./gradlew assembleRelease --no-daemon
+          else
+            echo "Building debug APK (no signing keys configured)..."
+            ./gradlew assembleDebug --no-daemon
+          fi
 
       - name: Rename APK with version
         run: |
           VERSION=${{ github.event.inputs.version }}
-          cp packages/web/android/app/build/outputs/apk/debug/app-debug.apk \
-             packages/web/android/app/build/outputs/apk/debug/SajuApp-${VERSION}.apk
+          if [ -f packages/web/android/app/build/outputs/apk/release/app-release.apk ]; then
+            cp packages/web/android/app/build/outputs/apk/release/app-release.apk \
+               packages/web/android/app/build/outputs/apk/SajuApp-${VERSION}.apk
+          else
+            cp packages/web/android/app/build/outputs/apk/debug/app-debug.apk \
+               packages/web/android/app/build/outputs/apk/SajuApp-${VERSION}.apk
+          fi
 
       - name: Upload Android APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: android-apk
-          path: packages/web/android/app/build/outputs/apk/debug/SajuApp-*.apk
+          path: packages/web/android/app/build/outputs/apk/SajuApp-*.apk
           if-no-files-found: error
 
   create-release:
@@ -134,28 +182,28 @@ jobs:
           cat > release-notes.md << 'EOF'
           ## 신기한신점 릴리즈
 
-          ### 📥 다운로드
+          ### 다운로드
 
           | 플랫폼 | 파일 | 설명 |
           |--------|------|------|
-          | 🖥️ Windows | `SajuApp-Setup-*.exe` | Windows 설치 파일 (NSIS 인스톨러) |
-          | 🤖 Android | `SajuApp-*.apk` | Android 설치 파일 (APK) |
+          | Windows | `SajuApp-Setup-*.exe` | Windows 설치 파일 |
+          | Android | `SajuApp-*.apk` | Android 설치 파일 |
 
-          ### 📋 설치 방법
+          ### 설치 방법
 
           **Windows**
-          1. `SajuApp-Setup-*.exe` 파일을 다운로드
+          1. SajuApp-Setup-*.exe 파일을 다운로드
           2. 파일을 실행하여 설치
           3. 시작 메뉴 또는 바탕화면 바로가기로 실행
 
           **Android**
-          1. `SajuApp-*.apk` 파일을 다운로드
-          2. 기기 설정 → 보안 → 알 수 없는 출처 앱 허용
+          1. SajuApp-*.apk 파일을 다운로드
+          2. 기기 설정 > 보안 > 알 수 없는 출처 앱 허용
           3. APK 파일을 실행하여 설치
 
-          ### ⚠️ 주의사항
-          - Android APK는 Debug 빌드입니다
+          ### 주의사항
           - 인터넷 연결이 필요합니다
+          - Android 기존 사용자: 서명 키 변경으로 인해 기존 앱을 삭제 후 재설치가 필요할 수 있습니다. 데이터는 서버에 저장되어 있으므로 로그인하면 복원됩니다.
           EOF
 
           gh release create ${RELEASE_VERSION} \
