@@ -40,7 +40,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-installer
-          path: packages/web/dist-electron/*.exe
+          path: |
+            packages/web/dist-electron/*.exe
+            packages/web/dist-electron/latest.yml
           if-no-files-found: error
 
   build-android:
